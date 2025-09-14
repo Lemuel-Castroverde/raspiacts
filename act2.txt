@@ -1,0 +1,127 @@
+import RPi.GPIO as GPIO
+GPIO.setwarnings(False)
+import time
+from luma.core.interface.serial import i2c
+from luma.oled.device import ssd1306
+from PIL import Image, ImageDraw, ImageFont
+from flask import Flask, jsonify, render_template
+
+# Flask setup
+app = Flask(__name__)
+
+# ======================
+# Pin Configuration
+# ======================
+TRIG1 = 23
+ECHO1 = 24
+TRIG2 = 27
+ECHO2 = 22
+BUZZER = 18
+
+# ======================
+# GPIO Setup
+# ======================
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(TRIG1, GPIO.OUT)
+GPIO.setup(ECHO1, GPIO.IN)
+GPIO.setup(TRIG2, GPIO.OUT)
+GPIO.setup(ECHO2, GPIO.IN)
+GPIO.setup(BUZZER, GPIO.OUT)
+
+GPIO.output(TRIG1, False)
+GPIO.output(TRIG2, False)
+time.sleep(2)
+
+pwm = GPIO.PWM(BUZZER, 500)
+pwm_active = False   # Track if PWM is running
+buzzer_state = False
+
+# ======================
+# OLED Setup (luma.oled)
+# ======================
+serial = i2c(port=1, address=0x3C)
+oled = ssd1306(serial, width=128, height=64)
+font = ImageFont.load_default()
+
+# ======================
+# Functions
+# ======================
+def get_distance(trig, echo, timeout=0.02):
+    """Measure distance safely with timeout"""
+    GPIO.output(trig, True)
+    time.sleep(0.00001)
+    GPIO.output(trig, False)
+
+    start = time.time()
+    while GPIO.input(echo) == 0:
+        if time.time() - start > timeout:
+            return -1
+        start = time.time()
+
+    stop = time.time()
+    while GPIO.input(echo) == 1:
+        if time.time() - stop > timeout:
+            return -1
+        stop = time.time()
+
+    elapsed = stop - start
+    distance = (elapsed * 34300) / 2
+    return round(distance, 2)
+
+def display_data(dist1, dist2):
+    """Display readings on OLED"""
+    image = Image.new("1", (oled.width, oled.height))
+    draw = ImageDraw.Draw(image)
+
+    draw.text((0, 0), "Ultrasonic Distances", font=font, fill=255)
+    draw.text((0, 20), f"Sensor1: {dist1:.1f} cm" if dist1 != -1 else "Sensor1: timeout", font=font, fill=255)
+    draw.text((0, 40), f"Sensor2: {dist2:.1f} cm" if dist2 != -1 else "Sensor2: timeout", font=font, fill=255)
+
+    oled.display(image)
+
+def control_buzzer(state):
+    """Start or stop buzzer safely"""
+    global pwm_active, buzzer_state
+    if state and not pwm_active:
+        pwm.start(50)
+        pwm_active = True
+        buzzer_state = True
+    elif not state and pwm_active:
+        pwm.stop()
+        pwm_active = False
+        buzzer_state = False
+
+# ======================
+# Routes
+# ======================
+@app.route("/")
+def index():
+    return render_template("Act2.html")
+
+@app.route("/data")
+def data():
+    d1 = get_distance(TRIG1, ECHO1)
+    d2 = get_distance(TRIG2, ECHO2)
+
+    print(f"Sensor1: {d1:.1f} cm | Sensor2: {d2:.1f} cm")
+    display_data(d1, d2)
+
+    # Buzzer logic
+    if (d1 != -1 and d1 >= 12) or (d2 != -1 and d2 >= 12):
+        control_buzzer(True)
+    else:
+        control_buzzer(False)
+
+    return jsonify({"sensor1": d1, "sensor2": d2, "buzzer": buzzer_state})
+
+# ======================
+# Main
+# ======================
+if __name__ == "__main__":
+    try:
+        app.run(host="0.0.0.0", port=5000, debug=False)  # disable auto-restart
+    except KeyboardInterrupt:
+        pass
+    finally:
+        pwm.stop()
+        GPIO.cleanup()
